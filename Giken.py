@@ -3,6 +3,15 @@ import streamlit as st
 # 既存のページ設定
 st.set_page_config(page_title="スキークラブ連絡帳", page_icon="⛷️")
 
+# PWAマニフェストの読み込みコード（追加）
+st.markdown("""
+    <link rel="manifest" href="https://raw.githubusercontent.com/buita04-cell/GIKEN-ski-club-app/main/manifest.json">
+""", unsafe_allow_html=True)
+import streamlit as st
+
+# 既存のページ設定
+st.set_page_config(page_title="スキークラブ連絡帳", page_icon="⛷️")
+
 # PWA・PWABuilder用の設定読み込み（追加）
 st.markdown("""
     <link rel="manifest" href="https://raw.githubusercontent.com/buita04-cell/GIKEN-ski-club-app/main/manifest.json">
