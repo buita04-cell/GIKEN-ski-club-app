@@ -1,1 +1,28 @@
 
+{
+  "name": "クラブ専用 ゲレンデ連絡帳",
+  "short_name": "ゲレンデ連絡帳",
+  "description": "スキークラブ専用のチェックイン・コンディション報告・動画共有アプリ",
+  "id": "/GIKEN-ski-club-app/",
+  "start_url": "/GIKEN-ski-club-app/",
+  "scope": "/GIKEN-ski-club-app/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#e53935",
+  "lang": "ja",
+  "icons": [
+    {
+      "src": "https://raw.githubusercontent.com/buita04-cell/GIKEN-ski-club-app/main/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "https://raw.githubusercontent.com/buita04-cell/GIKEN-ski-club-app/main/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
+
