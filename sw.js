@@ -1,5 +1,5 @@
 
-const CACHE_NAME = "giken-pwa-v1";
+const CACHE_NAME = "giken-pwa-v2";
 
 const APP_FILES = [
   "./",
@@ -13,9 +13,8 @@ self.addEventListener("install", (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
       return cache.addAll(APP_FILES);
-    })
+    }).then(() => self.skipWaiting())
   );
-  self.skipWaiting();
 });
 
 self.addEventListener("activate", (event) => {
@@ -23,12 +22,14 @@ self.addEventListener("activate", (event) => {
     caches.keys().then((keys) =>
       Promise.all(
         keys
-          .filter((key) => key !== CACHE_NAME)
+          .filter((key) =>
+            key.startsWith("giken-pwa-") &&
+            key !== CACHE_NAME
+          )
           .map((key) => caches.delete(key))
       )
-    )
+    ).then(() => self.clients.claim())
   );
-  self.clients.claim();
 });
 
 self.addEventListener("fetch", (event) => {
@@ -39,9 +40,27 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
 
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      return cached || fetch(event.request);
+    caches.match(event.request).then(async (cached) => {
+      if (cached) return cached;
+
+      try {
+        return await fetch(event.request);
+      } catch (error) {
+        console.warn("Network request failed:", url.pathname);
+
+        if (event.request.mode === "navigate") {
+          const fallback = await caches.match("./index.html");
+          if (fallback) return fallback;
+        }
+
+        return new Response("Resource unavailable", {
+          status: 503,
+          statusText: "Service Unavailable",
+          headers: {
+            "Content-Type": "text/plain; charset=utf-8"
+          }
+        });
+      }
     })
   );
 });
-
