@@ -3,20 +3,13 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport"
-        content="width=device-width, initial-scale=1">
-
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>クラブ専用 ゲレンデ連絡帳</title>
 
-  <!-- PWA設定 -->
   <link rel="manifest" href="./manifest.webmanifest">
   <meta name="theme-color" content="#e53935">
-
-  <!-- アプリアイコン -->
-  <link rel="icon" type="image/png"
-        href="./icon-192.png">
-  <link rel="apple-touch-icon"
-        href="./icon-192.png">
+  <link rel="icon" type="image/png" href="./icon-192.png">
+  <link rel="apple-touch-icon" href="./icon-192.png">
 
   <style>
     body {
@@ -26,64 +19,144 @@
       color: #293246;
       text-align: center;
     }
-
     main {
       max-width: 480px;
       margin: 12vh auto;
       padding: 24px;
     }
-
-    h1 {
-      font-size: 26px;
-    }
-
-    p {
-      line-height: 1.8;
-    }
-
-    a {
+    h1 { font-size: 26px; }
+    p { line-height: 1.8; }
+    input {
+      box-sizing: border-box;
       display: block;
-      margin-top: 30px;
-      padding: 18px;
+      width: 100%;
+      padding: 14px;
+      margin: 12px 0;
+      border: 1px solid #bbb;
+      border-radius: 8px;
+      font-size: 16px;
+    }
+    button, .app-link {
+      box-sizing: border-box;
+      display: block;
+      width: 100%;
+      margin-top: 20px;
+      padding: 16px;
       background: #e53935;
       color: white;
+      border: 0;
       border-radius: 12px;
       text-decoration: none;
+      font-size: 16px;
       font-weight: bold;
+      cursor: pointer;
     }
+    #message { color: #b71c1c; }
+    #app-area { display: none; }
+    #logout { background: #596579; }
   </style>
 </head>
 
 <body>
   <main>
     <h1>⛷️ クラブ専用 ゲレンデ連絡帳</h1>
+    <p>スキークラブの連絡・チェックイン・動画共有</p>
 
-    <p>
-      スキークラブの連絡・チェックイン・動画共有
-    </p>
+    <section id="login-area">
+      <h2>会員ログイン</h2>
+      <form id="login-form">
+        <input id="email" type="email"
+               placeholder="メールアドレス"
+               autocomplete="username" required>
+        <input id="password" type="password"
+               placeholder="パスワード"
+               autocomplete="current-password" required>
+        <button type="submit">ログイン</button>
+      </form>
+      <p id="message" role="status"></p>
+    </section>
 
-    <a href="https://giken-ski-club.streamlit.app/">
-      ゲレンデ連絡帳を開く
-    </a>
+    <section id="app-area">
+      <p>ログインしました。</p>
+      <a class="app-link"
+         href="https://giken-ski-club.streamlit.app/">
+        ゲレンデ連絡帳を開く
+      </a>
+      <button id="logout" type="button">ログアウト</button>
+    </section>
   </main>
 
-  <!-- Service Worker登録 -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
   <script>
+    const SUPABASE_URL =
+      "https://oqnmzqulfuedyrkwebsm.supabase.co";
+    const SUPABASE_KEY = "sb_publishable_Rm2F6WXitHtTJv2nxHFtkw_v2RT7K7u";
+
+    const client = window.supabase.createClient(
+      SUPABASE_URL,
+      SUPABASE_KEY
+    );
+
+    const loginArea = document.getElementById("login-area");
+    const appArea = document.getElementById("app-area");
+    const message = document.getElementById("message");
+
+    function showSession(session) {
+      loginArea.style.display = session ? "none" : "block";
+      appArea.style.display = session ? "block" : "none";
+    }
+
+    document.getElementById("login-form")
+      .addEventListener("submit", async function (event) {
+        event.preventDefault();
+        message.textContent = "ログイン確認中...";
+
+        const email = document.getElementById("email").value;
+        const password = document.getElementById("password").value;
+
+        const { data, error } =
+          await client.auth.signInWithPassword({
+            email: email,
+            password: password
+          });
+
+        if (error) {
+          message.textContent =
+            "ログインできません。入力内容をご確認ください。";
+          return;
+        }
+
+        message.textContent = "";
+        showSession(data.session);
+      });
+
+    document.getElementById("logout")
+      .addEventListener("click", async function () {
+        const { error } = await client.auth.signOut();
+        if (error) {
+          message.textContent = "ログアウトに失敗しました。";
+          return;
+        }
+        showSession(null);
+      });
+
+    client.auth.onAuthStateChange(function (_event, session) {
+      showSession(session);
+    });
+
+    client.auth.getSession().then(function ({ data }) {
+      showSession(data.session);
+    });
+
     if ("serviceWorker" in navigator) {
       window.addEventListener("load", function () {
         navigator.serviceWorker
           .register("./sw.js")
           .then(function (registration) {
-            console.log(
-              "Service Worker registered:",
-              registration.scope
-            );
+            console.log("Service Worker registered:", registration.scope);
           })
           .catch(function (error) {
-            console.error(
-              "Service Worker registration failed:",
-              error
-            );
+            console.error("Service Worker registration failed:", error);
           });
       });
     }
