@@ -21,7 +21,7 @@
     }
     main {
       max-width: 480px;
-      margin: 12vh auto;
+      margin: 8vh auto;
       padding: 24px;
     }
     h1 { font-size: 26px; }
@@ -51,9 +51,20 @@
       font-weight: bold;
       cursor: pointer;
     }
-    #message { color: #b71c1c; }
-    #app-area { display: none; }
+    button:disabled {
+      opacity: 0.6;
+      cursor: wait;
+    }
+    #message, #reset-message {
+      min-height: 1.5em;
+      color: #b71c1c;
+    }
+    #app-area, #reset-area { display: none; }
     #logout { background: #596579; }
+    .sub-button {
+      background: #596579;
+    }
+    [hidden] { display: none !important; }
   </style>
 </head>
 
@@ -62,7 +73,7 @@
     <h1>⛷️ クラブ専用 ゲレンデ連絡帳</h1>
     <p>スキークラブの連絡・チェックイン・動画共有</p>
 
-    <section id="login-area">
+    <section id="login-area" hidden>
       <h2>会員ログイン</h2>
       <form id="login-form">
         <input id="email" type="email"
@@ -76,7 +87,26 @@
       <p id="message" role="status"></p>
     </section>
 
-    <section id="app-area">
+    <section id="reset-area" hidden>
+      <h2>パスワード再設定</h2>
+      <p>新しいパスワードを入力してください。</p>
+      <form id="reset-form">
+        <input id="new-password" type="password"
+               placeholder="新しいパスワード（12文字以上）"
+               autocomplete="new-password"
+               minlength="12" required>
+        <input id="confirm-password" type="password"
+               placeholder="新しいパスワード（確認）"
+               autocomplete="new-password"
+               minlength="12" required>
+        <button id="reset-button" type="submit">
+          パスワードを設定する
+        </button>
+      </form>
+      <p id="reset-message" role="status"></p>
+    </section>
+
+    <section id="app-area" hidden>
       <p>ログインしました。</p>
       <a class="app-link"
          href="https://giken-ski-club.streamlit.app/">
@@ -94,16 +124,125 @@
 
     const client = window.supabase.createClient(
       SUPABASE_URL,
-      SUPABASE_KEY
+      SUPABASE_KEY,
+      {
+        auth: {
+          detectSessionInUrl: true,
+          persistSession: true,
+          autoRefreshToken: true
+        }
+      }
     );
 
     const loginArea = document.getElementById("login-area");
+    const resetArea = document.getElementById("reset-area");
     const appArea = document.getElementById("app-area");
     const message = document.getElementById("message");
+    const resetMessage = document.getElementById("reset-message");
+
+    let recoveryMode = false;
+    let recoveryReady = false;
+
+    function showArea(area) {
+      loginArea.hidden = area !== "login";
+      resetArea.hidden = area !== "reset";
+      appArea.hidden = area !== "app";
+    }
 
     function showSession(session) {
-      loginArea.style.display = session ? "none" : "block";
-      appArea.style.display = session ? "block" : "none";
+      if (recoveryMode) {
+        showArea("reset");
+      } else {
+        showArea(session ? "app" : "login");
+      }
+    }
+
+    const urlParams = new URLSearchParams(
+      window.location.search
+    );
+    const hashParams = new URLSearchParams(
+      window.location.hash.substring(1)
+    );
+
+    if (
+      hashParams.get("type") === "recovery" ||
+      urlParams.get("type") === "recovery" ||
+      urlParams.has("token_hash")
+    ) {
+      recoveryMode = true;
+      showArea("reset");
+    }
+
+    client.auth.onAuthStateChange(function (event, session) {
+      if (event === "PASSWORD_RECOVERY") {
+        recoveryMode = true;
+        recoveryReady = true;
+        showArea("reset");
+        resetMessage.textContent = "";
+        return;
+      }
+
+      if (recoveryMode) {
+        showArea("reset");
+        return;
+      }
+
+      showSession(session);
+    });
+
+    async function initialize() {
+      const tokenHash = urlParams.get("token_hash");
+      const tokenType = urlParams.get("type");
+
+      if (tokenHash && tokenType === "recovery") {
+        recoveryMode = true;
+        showArea("reset");
+
+        const { error } = await client.auth.verifyOtp({
+          token_hash: tokenHash,
+          type: "recovery"
+        });
+
+        if (error) {
+          resetMessage.textContent =
+            "再設定リンクが無効か期限切れです。再送信してください。";
+          return;
+        }
+
+        recoveryReady = true;
+        window.history.replaceState(
+          {},
+          document.title,
+          window.location.pathname
+        );
+        return;
+      }
+
+      const { data, error } = await client.auth.getSession();
+
+      if (error) {
+        if (recoveryMode) {
+          resetMessage.textContent =
+            "再設定リンクを確認できませんでした。再送信してください。";
+        } else {
+          showArea("login");
+          message.textContent =
+            "ログイン状態を確認できませんでした。";
+        }
+        return;
+      }
+
+      if (recoveryMode) {
+        if (data.session) {
+          recoveryReady = true;
+        } else {
+          resetMessage.textContent =
+            "再設定リンクが無効か期限切れです。再送信してください。";
+        }
+        showArea("reset");
+      } else {
+        showSession(data.session);
+      }
     }
 
     document.getElementById("login-form")
@@ -130,33 +269,99 @@
         showSession(data.session);
       });
 
+    document.getElementById("reset-form")
+      .addEventListener("submit", async function (event) {
+        event.preventDefault();
+
+        if (!recoveryMode || !recoveryReady) {
+          resetMessage.textContent =
+            "再設定リンクを確認できません。新しいメールを取得してください。";
+          return;
+        }
+
+        const password =
+          document.getElementById("new-password").value;
+        const confirm =
+          document.getElementById("confirm-password").value;
+
+        if (password.length < 12) {
+          resetMessage.textContent =
+            "パスワードは12文字以上にしてください。";
+          return;
+        }
+
+        if (password !== confirm) {
+          resetMessage.textContent =
+            "確認用パスワードが一致しません。";
+          return;
+        }
+
+        const button = document.getElementById("reset-button");
+        button.disabled = true;
+        resetMessage.textContent = "パスワードを設定中...";
+
+        try {
+          const { error } = await client.auth.updateUser({
+            password: password
+          });
+
+          if (error) {
+            resetMessage.textContent =
+              "設定できませんでした。リンクの期限などをご確認ください。";
+            return;
+          }
+
+          const { error: signOutError } =
+            await client.auth.signOut();
+
+          if (signOutError) {
+            resetMessage.textContent =
+              "パスワードは設定されましたが、ログアウトに失敗しました。";
+            return;
+          }
+
+          recoveryMode = false;
+          recoveryReady = false;
+          document.getElementById("reset-form").reset();
+          document.getElementById("login-form").reset();
+          showArea("login");
+          message.style.color = "#176b37";
+          message.textContent =
+            "パスワードを設定しました。新しいパスワードでログインしてください。";
+        } finally {
+          button.disabled = false;
+        }
+      });
+
     document.getElementById("logout")
       .addEventListener("click", async function () {
         const { error } = await client.auth.signOut();
+
         if (error) {
-          message.textContent = "ログアウトに失敗しました。";
+          alert("ログアウトに失敗しました。");
           return;
         }
-        showSession(null);
+
+        showArea("login");
       });
 
-    client.auth.onAuthStateChange(function (_event, session) {
-      showSession(session);
-    });
-
-    client.auth.getSession().then(function ({ data }) {
-      showSession(data.session);
-    });
+    initialize();
 
     if ("serviceWorker" in navigator) {
       window.addEventListener("load", function () {
         navigator.serviceWorker
           .register("./sw.js")
           .then(function (registration) {
-            console.log("Service Worker registered:", registration.scope);
+            console.log(
+              "Service Worker registered:",
+              registration.scope
+            );
           })
           .catch(function (error) {
-            console.error("Service Worker registration failed:", error);
+            console.error(
+              "Service Worker registration failed:",
+              error
+            );
           });
       });
     }
