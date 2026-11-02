@@ -64,6 +64,13 @@
       background: #596579;
     }
     [hidden] { display: none !important; }
+    select { box-sizing: border-box; display: block; width: 100%; padding: 14px; margin: 12px 0; border: 1px solid #bbb; border-radius: 8px; font-size: 16px; background: white; }
+    .checkin-panel { text-align: left; margin: 24px 0; padding: 16px; background: white; border-radius: 12px; }
+    .checkin-panel h2 { text-align: center; }
+    .checkin-panel label { display: block; font-weight: bold; margin-top: 12px; }
+    .checkin-item { padding: 12px 0; border-bottom: 1px solid #ddd; overflow-wrap: anywhere; }
+    .checkin-item p { margin: 4px 0; }
+    #checkin-message { min-height: 1.5em; }
   </style>
 </head>
 
@@ -111,6 +118,37 @@
          href="https://giken-ski-club.streamlit.app/">
         ゲレンデ連絡帳を開く
       </a>
+      <div class="checkin-panel">
+        <h2>📍 ゲレンデなう</h2>
+        <form id="checkin-form">
+          <label for="member-name">👤 あなたのお名前</label>
+          <input id="member-name" type="text" maxlength="40" placeholder="会員名を入力" required>
+          <label for="resort-name">🏔️ 今どこにいますか？</label>
+          <select id="resort-name" required>
+            <option value="">選択してください</option>
+            <option>イエティ</option><option>リバウェル井川</option><option>富士天神山</option>
+            <option>白馬八方尾根</option><option>野沢温泉</option><option>志賀高原</option>
+            <option>その他（県外）</option>
+          </select>
+          <label for="snow-condition">❄️ 今日の雪質・状況</label>
+          <select id="snow-condition" required>
+            <option>粉雪・パウダー</option><option>圧雪・良好</option>
+            <option>シャバ雪・春雪</option><option>硬め・アイスバーン</option>
+          </select>
+          <label for="quick-comment">💬 一言メッセージ</label>
+          <select id="quick-comment">
+            <option value="">指定なし</option>
+            <option>最高のパウダー！</option><option>バーンが引き締まって快適！</option>
+            <option>午後はアイスバーン注意</option><option>少し混雑しています</option>
+            <option>休憩中・ランチなう ☕</option><option>無事下山・帰路につきます 🚗</option>
+          </select>
+          <button id="checkin-submit" type="submit">🚀 これで投稿する</button>
+        </form>
+        <p id="checkin-message" role="status" aria-live="polite"></p>
+        <h2>📋 最近のチェックイン</h2>
+        <button id="refresh-checkins" type="button" class="sub-button">一覧を更新</button>
+        <div id="checkin-list" aria-live="polite"></div>
+      </div>
       <button id="logout" type="button">ログアウト</button>
     </section>
   </main>
@@ -153,6 +191,12 @@
         showArea("reset");
       } else {
         showArea(session ? "app" : "login");
+        if (session) {
+          loadCheckins();
+        } else {
+          document.getElementById("checkin-list").replaceChildren();
+          document.getElementById("checkin-message").textContent = "";
+        }
       }
     }
 
@@ -342,6 +386,84 @@
         }
 
         showArea("login");
+      });
+
+    async function loadCheckins() {
+      const list = document.getElementById("checkin-list");
+      list.textContent = "読み込み中...";
+      const { data: authData, error: authError } = await client.auth.getUser();
+      if (authError || !authData.user) {
+        list.textContent = "ログイン状態を確認できません。";
+        return;
+      }
+      const { data, error } = await client.from("checkins")
+        .select("id,created_at,member_name,resort_name,condition,comment")
+        .order("created_at", { ascending: false })
+        .limit(30);
+      if (error) {
+        list.textContent = "一覧を取得できませんでした。設定・通信状態を確認してください。";
+        console.error("checkins select error", error);
+        return;
+      }
+      list.replaceChildren();
+      if (!data.length) {
+        list.textContent = "まだ投稿がありません。";
+        return;
+      }
+      for (const item of data) {
+        const entry = document.createElement("div");
+        entry.className = "checkin-item";
+        const heading = document.createElement("strong");
+        const when = item.created_at ? new Date(item.created_at).toLocaleString("ja-JP") : "";
+        heading.textContent = `${item.member_name}（${when}）`;
+        const detail = document.createElement("p");
+        detail.textContent = `📍 ${item.resort_name} ｜ ❄️ ${item.condition}`;
+        entry.append(heading, detail);
+        if (item.comment) {
+          const comment = document.createElement("p");
+          comment.textContent = `💬 ${item.comment}`;
+          entry.append(comment);
+        }
+        list.append(entry);
+      }
+    }
+
+    document.getElementById("refresh-checkins")
+      .addEventListener("click", loadCheckins);
+
+    document.getElementById("checkin-form")
+      .addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const status = document.getElementById("checkin-message");
+        const button = document.getElementById("checkin-submit");
+        const member_name = document.getElementById("member-name").value.trim();
+        const resort_name = document.getElementById("resort-name").value;
+        const condition = document.getElementById("snow-condition").value;
+        const comment = document.getElementById("quick-comment").value;
+        if (!member_name || !resort_name) {
+          status.textContent = "お名前とゲレンデを入力してください。";
+          return;
+        }
+        button.disabled = true;
+        status.textContent = "投稿中...";
+        try {
+          const { data: authData, error: authError } = await client.auth.getUser();
+          if (authError || !authData.user) {
+            status.textContent = "ログインし直してください。";
+            return;
+          }
+          const { error } = await client.from("checkins")
+            .insert({ member_name, resort_name, condition, comment: comment || null });
+          if (error) {
+            console.error("checkins insert error", error);
+            status.textContent = "投稿に失敗しました。通信・権限設定をご確認ください。";
+            return;
+          }
+          status.textContent = "投稿を保存しました。";
+          await loadCheckins();
+        } finally {
+          button.disabled = false;
+        }
       });
 
     initialize();
