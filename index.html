@@ -71,6 +71,14 @@
     .checkin-item { padding: 12px 0; border-bottom: 1px solid #ddd; overflow-wrap: anywhere; }
     .checkin-item p { margin: 4px 0; }
     #checkin-message { min-height: 1.5em; }
+    .video-panel { text-align: left; margin: 24px 0; padding: 16px; background: white; border-radius: 12px; }
+    .video-panel h2 { text-align: center; }
+    .video-panel label { display: block; font-weight: bold; margin-top: 12px; }
+    .video-item { padding: 14px 0; border-bottom: 1px solid #ddd; overflow-wrap: anywhere; }
+    .video-item video { width: 100%; max-height: 340px; margin-top: 8px; background: #111; border-radius: 8px; }
+    .video-note { font-size: 13px; color: #596579; }
+    #video-message { min-height: 1.5em; overflow-wrap: anywhere; }
+    #video-file { padding: 10px; }
   </style>
 </head>
 
@@ -149,6 +157,21 @@
         <button id="refresh-checkins" type="button" class="sub-button">一覧を更新</button>
         <div id="checkin-list" aria-live="polite"></div>
       </div>
+      <div class="video-panel">
+        <h2>🎥 15秒動画の共有</h2>
+        <p class="video-note">会員専用・最大15秒・10MBまで。投稿から7日間表示します。</p>
+        <form id="video-form">
+          <label for="video-member-name">👤 投稿者のお名前</label>
+          <input id="video-member-name" type="text" maxlength="40" placeholder="会員名を入力" required>
+          <label for="video-file">📹 動画を選択（MP4 / MOV）</label>
+          <input id="video-file" type="file" accept="video/mp4,video/quicktime,.mp4,.mov" required>
+          <button id="video-submit" type="submit">🎥 動画を投稿する</button>
+        </form>
+        <p id="video-message" role="status" aria-live="polite"></p>
+        <h2>📺 最近の動画</h2>
+        <button id="refresh-videos" type="button" class="sub-button">動画一覧を更新</button>
+        <div id="video-list" aria-live="polite"></div>
+      </div>
       <button id="logout" type="button">ログアウト</button>
     </section>
   </main>
@@ -193,9 +216,12 @@
         showArea(session ? "app" : "login");
         if (session) {
           loadCheckins();
+          loadVideos();
         } else {
           document.getElementById("checkin-list").replaceChildren();
           document.getElementById("checkin-message").textContent = "";
+          clearVideos();
+          document.getElementById("video-message").textContent = "";
         }
       }
     }
@@ -385,7 +411,7 @@
           return;
         }
 
-        showArea("login");
+        showSession(null);
       });
 
     async function loadCheckins() {
@@ -461,6 +487,179 @@
           }
           status.textContent = "投稿を保存しました。";
           await loadCheckins();
+        } finally {
+          button.disabled = false;
+        }
+      });
+
+
+    // Storage内の動画は非公開。ログイン中のみ短期間有効な署名URLで再生する。
+    const VIDEO_BUCKET = "ski-videos";
+    const VIDEO_MAX_BYTES = 10 * 1024 * 1024;
+    const VIDEO_MAX_SECONDS = 15;
+    let videoListRequest = 0;
+
+    function clearVideos() {
+      videoListRequest++;
+      const list = document.getElementById("video-list");
+      for (const player of list.querySelectorAll("video")) {
+        player.pause();
+        player.removeAttribute("src");
+        player.load();
+      }
+      list.replaceChildren();
+    }
+
+    function videoFileType(file) {
+      const extension = file.name.toLowerCase().split(".").pop();
+      if (extension === "mp4" && (!file.type || file.type === "video/mp4")) return "video/mp4";
+      if (extension === "mov" && (!file.type || file.type === "video/quicktime")) return "video/quicktime";
+      return null;
+    }
+
+    function readVideoDuration(file) {
+      return new Promise((resolve, reject) => {
+        const probe = document.createElement("video");
+        const url = URL.createObjectURL(file);
+        let settled = false;
+        const timeout = setTimeout(() => finish(new Error("動画情報の取得がタイムアウトしました。")), 15000);
+        function finish(error, duration) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          probe.removeAttribute("src");
+          probe.load();
+          URL.revokeObjectURL(url);
+          if (error) reject(error); else resolve(duration);
+        }
+        probe.preload = "metadata";
+        probe.onloadedmetadata = () => {
+          if (!Number.isFinite(probe.duration) || probe.duration <= 0) {
+            finish(new Error("動画の長さを確認できませんでした。"));
+          } else {
+            finish(null, probe.duration);
+          }
+        };
+        probe.onerror = () => finish(new Error("この端末では動画を読み取れません。別のMP4動画をお試しください。"));
+        probe.src = url;
+      });
+    }
+
+    async function loadVideos() {
+      const list = document.getElementById("video-list");
+      clearVideos();
+      // clearVideos() は古い読み込みを無効化するため、最新IDを取り直す。
+      const currentRequest = videoListRequest;
+      list.textContent = "読み込み中...";
+      const { data: authData, error: authError } = await client.auth.getUser();
+      if (currentRequest !== videoListRequest || appArea.hidden) return;
+      if (authError || !authData.user) {
+        list.textContent = "ログイン状態を確認できません。";
+        return;
+      }
+      const { data, error } = await client.from("videos")
+        .select("id,created_at,member_name,storage_path,expires_at")
+        .gt("expires_at", new Date().toISOString())
+        .order("created_at", { ascending: false })
+        .limit(30);
+      if (currentRequest !== videoListRequest || appArea.hidden) return;
+      if (error) {
+        console.error("videos select error", error);
+        list.textContent = "動画一覧を取得できませんでした。";
+        return;
+      }
+      list.replaceChildren();
+      if (!data.length) {
+        list.textContent = "まだ動画の投稿がありません。";
+        return;
+      }
+      for (const item of data) {
+        if (currentRequest !== videoListRequest || appArea.hidden) return;
+        const entry = document.createElement("div");
+        entry.className = "video-item";
+        const title = document.createElement("strong");
+        const when = item.created_at ? new Date(item.created_at).toLocaleString("ja-JP") : "";
+        title.textContent = `${item.member_name || "会員"}（${when}）`;
+        entry.append(title);
+        const { data: signed, error: signedError } = await client.storage
+          .from(VIDEO_BUCKET).createSignedUrl(item.storage_path, 60 * 30);
+        if (currentRequest !== videoListRequest || appArea.hidden) return;
+        if (signedError || !signed?.signedUrl) {
+          const msg = document.createElement("p");
+          msg.textContent = "動画を読み込めませんでした。";
+          entry.append(msg);
+        } else {
+          const player = document.createElement("video");
+          player.controls = true;
+          player.preload = "none";
+          player.playsInline = true;
+          player.src = signed.signedUrl;
+          entry.append(player);
+        }
+        list.append(entry);
+      }
+    }
+
+    document.getElementById("refresh-videos")
+      .addEventListener("click", loadVideos);
+
+    document.getElementById("video-form")
+      .addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const status = document.getElementById("video-message");
+        const button = document.getElementById("video-submit");
+        const file = document.getElementById("video-file").files[0];
+        const member_name = document.getElementById("video-member-name").value.trim();
+        if (!file || !member_name) {
+          status.textContent = "お名前と動画を指定してください。";
+          return;
+        }
+        const contentType = videoFileType(file);
+        if (!contentType) {
+          status.textContent = "MP4またはMOVファイルを選択してください。";
+          return;
+        }
+        if (file.size > VIDEO_MAX_BYTES || file.size === 0) {
+          status.textContent = "動画は10MB以下のファイルを選択してください。";
+          return;
+        }
+        button.disabled = true;
+        status.textContent = "動画の長さを確認しています...";
+        try {
+          const duration = await readVideoDuration(file);
+          if (duration > VIDEO_MAX_SECONDS + 0.05) {
+            status.textContent = "15秒以内の動画を選択してください。";
+            return;
+          }
+          const { data: authData, error: authError } = await client.auth.getUser();
+          if (authError || !authData.user || appArea.hidden) {
+            status.textContent = "ログインし直してください。";
+            return;
+          }
+          const user = authData.user;
+          const extension = contentType === "video/mp4" ? "mp4" : "mov";
+          const path = `${user.id}/${crypto.randomUUID()}.${extension}`;
+          status.textContent = "動画をアップロード中...";
+          const { error: uploadError } = await client.storage.from(VIDEO_BUCKET)
+            .upload(path, file, { contentType, upsert: false });
+          if (uploadError) {
+            console.error("video upload error", uploadError);
+            status.textContent = "アップロードに失敗しました。通信・権限設定をご確認ください。";
+            return;
+          }
+          const { error: insertError } = await client.from("videos")
+            .insert({ user_id: user.id, member_name, storage_path: path });
+          if (insertError) {
+            console.error("videos insert error", insertError);
+            status.textContent = "動画は転送されましたが、投稿履歴の登録に失敗しました。管理者に連絡してください。";
+            return;
+          }
+          document.getElementById("video-file").value = "";
+          status.textContent = "動画を投稿しました。";
+          await loadVideos();
+        } catch (error) {
+          console.error("video validation error", error);
+          status.textContent = error.message || "動画を確認できませんでした。";
         } finally {
           button.disabled = false;
         }
