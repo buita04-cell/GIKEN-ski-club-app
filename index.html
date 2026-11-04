@@ -122,11 +122,10 @@
 
     <section id="app-area" hidden>
       <p>ログインしました。</p>
-      <a class="app-link"
-         href="https://giken-ski-club.streamlit.app/">
-        ゲレンデ連絡帳を開く
+      <a class="app-link" href="#checkin-panel">
+        ゲレンデ連絡帳を開く（チェックイン・動画共有）
       </a>
-      <div class="checkin-panel">
+      <div class="checkin-panel" id="checkin-panel">
         <h2>📍 ゲレンデなう</h2>
         <form id="checkin-form">
           <label for="member-name">👤 あなたのお名前</label>
@@ -651,7 +650,15 @@
             .insert({ user_id: user.id, member_name, storage_path: path });
           if (insertError) {
             console.error("videos insert error", insertError);
-            status.textContent = "動画は転送されましたが、投稿履歴の登録に失敗しました。管理者に連絡してください。";
+            // DB登録に失敗した動画がStorageに残らないよう、削除を試みる。
+            const { error: cleanupError } = await client.storage
+              .from(VIDEO_BUCKET).remove([path]);
+            if (cleanupError) {
+              console.error("orphan video cleanup error", cleanupError);
+              status.textContent = "投稿履歴の登録に失敗し、動画の後片付けもできませんでした。管理者に連絡してください。";
+            } else {
+              status.textContent = "投稿履歴の登録に失敗しました。動画の転送を取り消しました。もう一度お試しください。";
+            }
             return;
           }
           document.getElementById("video-file").value = "";
