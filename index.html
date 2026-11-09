@@ -79,6 +79,18 @@
     .video-note { font-size: 13px; color: #596579; }
     #video-message { min-height: 1.5em; overflow-wrap: anywhere; }
     #video-file { padding: 10px; }
+    .tab-nav { display: flex; gap: 8px; margin: 18px 0; position: sticky; top: 0; z-index: 10; background: #f4f7fb; padding: 10px 0; }
+    .tab-nav button { margin: 0; padding: 13px 6px; background: #596579; font-size: 15px; }
+    .tab-nav button[aria-selected="true"] { background: #e53935; }
+    .video-comments { margin-top: 14px; padding: 12px; background: #f4f7fb; border-radius: 8px; }
+    .video-comments h3 { margin: 4px 0 8px; font-size: 16px; }
+    .video-comments label { font-size: 14px; }
+    .video-comments textarea { width: 100%; min-height: 78px; box-sizing: border-box; padding: 10px; border: 1px solid #bbb; border-radius: 8px; font: inherit; resize: vertical; }
+    .video-comments button { margin-top: 10px; padding: 12px; }
+    .comment-item { padding: 8px 0; border-bottom: 1px solid #ddd; font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .comment-item strong { display: block; }
+    .comment-status { font-size: 13px; min-height: 1em; }
+
   </style>
 </head>
 
@@ -122,9 +134,10 @@
 
     <section id="app-area" hidden>
       <p>ログインしました。</p>
-      <a class="app-link" href="#checkin-panel">
-        ゲレンデ連絡帳を開く（チェックイン・動画共有）
-      </a>
+      <nav class="tab-nav" aria-label="機能切り替え">
+        <button id="tab-checkins" type="button" aria-selected="true" aria-controls="checkin-panel">📍 ゲレンデなう</button>
+        <button id="tab-videos" type="button" aria-selected="false" aria-controls="video-panel">🎥 動画共有</button>
+      </nav>
       <div class="checkin-panel" id="checkin-panel">
         <h2>📍 ゲレンデなう</h2>
         <form id="checkin-form">
@@ -156,7 +169,7 @@
         <button id="refresh-checkins" type="button" class="sub-button">一覧を更新</button>
         <div id="checkin-list" aria-live="polite"></div>
       </div>
-      <div class="video-panel">
+      <div class="video-panel" id="video-panel" hidden>
         <h2>🎥 15秒動画の共有</h2>
         <p class="video-note">会員専用・最大15秒・10MBまで。投稿から7日間表示します。</p>
         <form id="video-form">
@@ -199,6 +212,16 @@
     const message = document.getElementById("message");
     const resetMessage = document.getElementById("reset-message");
 
+    function selectTab(tab) {
+      const video = tab === "videos";
+      document.getElementById("checkin-panel").hidden = video;
+      document.getElementById("video-panel").hidden = !video;
+      document.getElementById("tab-checkins").setAttribute("aria-selected", String(!video));
+      document.getElementById("tab-videos").setAttribute("aria-selected", String(video));
+    }
+    document.getElementById("tab-checkins").addEventListener("click", () => selectTab("checkins"));
+    document.getElementById("tab-videos").addEventListener("click", () => selectTab("videos"));
+
     let recoveryMode = false;
     let recoveryReady = false;
 
@@ -214,6 +237,7 @@
       } else {
         showArea(session ? "app" : "login");
         if (session) {
+          selectTab("checkins");
           loadCheckins();
           loadVideos();
         } else {
@@ -572,6 +596,15 @@
         list.textContent = "まだ動画の投稿がありません。";
         return;
       }
+      // コメントの取得は一括で行い、動画ごとの問い合わせ増加を防ぐ。
+      const videoIds = data.map(item => item.id);
+      const { data: comments, error: commentsError } = await client.from("video_comments")
+        .select("id,video_id,member_name,body,created_at")
+        .in("video_id", videoIds)
+        .order("created_at", { ascending: true })
+        .limit(1000);
+      if (currentRequest !== videoListRequest || appArea.hidden) return;
+      if (commentsError) console.error("video comments select error", commentsError);
       for (const item of data) {
         if (currentRequest !== videoListRequest || appArea.hidden) return;
         const entry = document.createElement("div");
@@ -595,7 +628,85 @@
           player.src = signed.signedUrl;
           entry.append(player);
         }
+        const commentPanel = document.createElement("section");
+        commentPanel.className = "video-comments";
+        const commentTitle = document.createElement("h3");
+        commentTitle.textContent = "💬 動画へのアドバイス・コメント";
+        const commentList = document.createElement("div");
+        commentList.className = "comment-list";
+        if (commentsError) {
+          commentList.textContent = "コメントを読み込めませんでした。管理者に確認してください。";
+        } else {
+          renderComments(commentList, (comments || []).filter(c => c.video_id === item.id));
+        }
+        const form = document.createElement("form");
+        const nameLabel = document.createElement("label");
+        nameLabel.textContent = "お名前";
+        const nameInput = document.createElement("input");
+        nameInput.type = "text";
+        nameInput.maxLength = 40;
+        nameInput.required = true;
+        nameInput.placeholder = "会員名";
+        const bodyLabel = document.createElement("label");
+        bodyLabel.textContent = "コメント（500文字以内）";
+        const bodyInput = document.createElement("textarea");
+        bodyInput.maxLength = 500;
+        bodyInput.required = true;
+        bodyInput.placeholder = "滑りのアドバイスや感想を入力";
+        const submit = document.createElement("button");
+        submit.type = "submit";
+        submit.textContent = "コメントを投稿";
+        const status = document.createElement("p");
+        status.className = "comment-status";
+        status.setAttribute("role", "status");
+        form.append(nameLabel, nameInput, bodyLabel, bodyInput, submit, status);
+        form.addEventListener("submit", async event => {
+          event.preventDefault();
+          const member_name = nameInput.value.trim();
+          const body = bodyInput.value.trim();
+          if (!member_name || !body) { status.textContent = "お名前とコメントを入力してください。"; return; }
+          submit.disabled = true;
+          status.textContent = "投稿中...";
+          try {
+            const { data: authData, error: authError } = await client.auth.getUser();
+            if (authError || !authData.user) { status.textContent = "ログインし直してください。"; return; }
+            const { error: insertError } = await client.from("video_comments")
+              .insert({ video_id: item.id, user_id: authData.user.id, member_name, body });
+            if (insertError) {
+              console.error("video comment insert error", insertError);
+              status.textContent = "コメントを投稿できませんでした。権限・通信状態を確認してください。";
+              return;
+            }
+            bodyInput.value = "";
+            status.textContent = "コメントを投稿しました。";
+            const { data: latest, error: latestError } = await client.from("video_comments")
+              .select("id,video_id,member_name,body,created_at")
+              .eq("video_id", item.id).order("created_at", { ascending: true }).limit(100);
+            if (!latestError) renderComments(commentList, latest);
+          } catch (error) {
+            console.error("comment submission error", error);
+            status.textContent = "通信エラーが発生しました。";
+          } finally { submit.disabled = false; }
+        });
+        commentPanel.append(commentTitle, commentList, form);
+        entry.append(commentPanel);
         list.append(entry);
+      }
+    }
+
+    function renderComments(container, comments) {
+      container.replaceChildren();
+      if (!comments.length) { container.textContent = "まだコメントはありません。"; return; }
+      for (const comment of comments) {
+        const item = document.createElement("div");
+        item.className = "comment-item";
+        const name = document.createElement("strong");
+        const when = comment.created_at ? new Date(comment.created_at).toLocaleString("ja-JP") : "";
+        name.textContent = `${comment.member_name}（${when}）`;
+        const body = document.createElement("div");
+        body.textContent = comment.body;
+        item.append(name, body);
+        container.append(item);
       }
     }
 
