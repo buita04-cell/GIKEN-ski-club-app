@@ -71,6 +71,29 @@
     .checkin-item { padding: 12px 0; border-bottom: 1px solid #ddd; overflow-wrap: anywhere; }
     .checkin-item p { margin: 4px 0; }
     #checkin-message { min-height: 1.5em; }
+    .video-panel { text-align: left; margin: 24px 0; padding: 16px; background: white; border-radius: 12px; }
+    .video-panel h2 { text-align: center; }
+    .video-panel label { display: block; font-weight: bold; margin-top: 12px; }
+    .video-item { padding: 14px 0; border-bottom: 1px solid #ddd; overflow-wrap: anywhere; }
+    .video-item video { width: 100%; max-height: 340px; margin-top: 8px; background: #111; border-radius: 8px; }
+    .video-note { font-size: 13px; color: #596579; }
+    #video-message { min-height: 1.5em; overflow-wrap: anywhere; }
+    #video-file { padding: 10px; }
+    .tab-nav { display: flex; gap: 8px; margin: 18px 0; position: sticky; top: 0; z-index: 10; background: #f4f7fb; padding: 10px 0; }
+    .tab-nav button { margin: 0; padding: 13px 6px; background: #596579; font-size: 15px; }
+    .tab-nav button[aria-selected="true"] { background: #e53935; }
+    .video-comments { margin-top: 14px; padding: 12px; background: #f4f7fb; border-radius: 8px; }
+    .video-comments h3 { margin: 4px 0 8px; font-size: 16px; }
+    .video-comments label { font-size: 14px; }
+    .video-comments textarea { width: 100%; min-height: 78px; box-sizing: border-box; padding: 10px; border: 1px solid #bbb; border-radius: 8px; font: inherit; resize: vertical; }
+    .video-comments button { margin-top: 10px; padding: 12px; }
+    .comment-item { padding: 8px 0; border-bottom: 1px solid #ddd; font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .comment-item strong { display: block; }
+    .comment-status { font-size: 13px; min-height: 1em; }
+    .delete-button { width: auto; display: inline-block; margin: 9px 0 3px; padding: 8px 14px; background: #a52a2a; font-size: 13px; }
+    .delete-button:disabled { opacity: .5; }
+    .delete-note { color: #9b2727; font-size: 13px; white-space: pre-wrap; }
+
   </style>
 </head>
 
@@ -114,11 +137,11 @@
 
     <section id="app-area" hidden>
       <p>ログインしました。</p>
-      <a class="app-link"
-         href="https://giken-ski-club.streamlit.app/">
-        ゲレンデ連絡帳を開く
-      </a>
-      <div class="checkin-panel">
+      <nav class="tab-nav" aria-label="機能切り替え">
+        <button id="tab-checkins" type="button" aria-selected="true" aria-controls="checkin-panel">📍 ゲレンデなう</button>
+        <button id="tab-videos" type="button" aria-selected="false" aria-controls="video-panel">🎥 動画共有</button>
+      </nav>
+      <div class="checkin-panel" id="checkin-panel">
         <h2>📍 ゲレンデなう</h2>
         <form id="checkin-form">
           <label for="member-name">👤 あなたのお名前</label>
@@ -149,6 +172,21 @@
         <button id="refresh-checkins" type="button" class="sub-button">一覧を更新</button>
         <div id="checkin-list" aria-live="polite"></div>
       </div>
+      <div class="video-panel" id="video-panel" hidden>
+        <h2>🎥 15秒動画の共有</h2>
+        <p class="video-note">会員専用・最大15秒・10MBまで。投稿から7日間表示します。</p>
+        <form id="video-form">
+          <label for="video-member-name">👤 投稿者のお名前</label>
+          <input id="video-member-name" type="text" maxlength="40" placeholder="会員名を入力" required>
+          <label for="video-file">📹 動画を選択（MP4 / MOV）</label>
+          <input id="video-file" type="file" accept="video/mp4,video/quicktime,.mp4,.mov" required>
+          <button id="video-submit" type="submit">🎥 動画を投稿する</button>
+        </form>
+        <p id="video-message" role="status" aria-live="polite"></p>
+        <h2>📺 最近の動画</h2>
+        <button id="refresh-videos" type="button" class="sub-button">動画一覧を更新</button>
+        <div id="video-list" aria-live="polite"></div>
+      </div>
       <button id="logout" type="button">ログアウト</button>
     </section>
   </main>
@@ -177,6 +215,55 @@
     const message = document.getElementById("message");
     const resetMessage = document.getElementById("reset-message");
 
+    function selectTab(tab) {
+      const video = tab === "videos";
+      document.getElementById("checkin-panel").hidden = video;
+      document.getElementById("video-panel").hidden = !video;
+      document.getElementById("tab-checkins").setAttribute("aria-selected", String(!video));
+      document.getElementById("tab-videos").setAttribute("aria-selected", String(video));
+    }
+    document.getElementById("tab-checkins").addEventListener("click", () => selectTab("checkins"));
+    document.getElementById("tab-videos").addEventListener("click", () => selectTab("videos"));
+
+    // 管理者判定はDBのSECURITY DEFINER RPCで行う。表示判定とは別にRLSが削除権限を強制する。
+    let currentUserId = null;
+    let isAppAdmin = false;
+    let sessionGeneration = 0;
+    async function refreshDeleteIdentity() {
+      const generation = ++sessionGeneration;
+      const { data, error } = await client.auth.getUser();
+      if (generation !== sessionGeneration || error || !data?.user) {
+        if (generation === sessionGeneration) { currentUserId = null; isAppAdmin = false; }
+        return;
+      }
+      currentUserId = data.user.id;
+      isAppAdmin = false;
+      const result = await client.rpc("is_app_admin");
+      if (generation !== sessionGeneration) return;
+      if (result.error) console.warn("Admin status lookup unavailable", result.error);
+      else isAppAdmin = result.data === true;
+    }
+    function canDelete(ownerId) {
+      return !!currentUserId && (isAppAdmin || (ownerId != null && ownerId === currentUserId));
+    }
+    function appendDeleteButton(container, label, handler) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "delete-button";
+      button.textContent = label;
+      const status = document.createElement("div");
+      status.className = "delete-note";
+      button.addEventListener("click", async () => {
+        if (!window.confirm("この投稿を削除しますか？削除すると元に戻せません。")) return;
+        button.disabled = true;
+        status.textContent = "削除中...";
+        try { await handler(status); }
+        catch (error) { console.error("delete failed", error); status.textContent = "削除できませんでした。通信状態をご確認ください。"; }
+        finally { button.disabled = false; }
+      });
+      container.append(button, status);
+    }
+
     let recoveryMode = false;
     let recoveryReady = false;
 
@@ -192,10 +279,18 @@
       } else {
         showArea(session ? "app" : "login");
         if (session) {
-          loadCheckins();
+          selectTab("checkins");
+          refreshDeleteIdentity().then(() => {
+            if (!appArea.hidden) { loadCheckins(); loadVideos(); }
+          });
         } else {
+          sessionGeneration++;
+          currentUserId = null;
+          isAppAdmin = false;
           document.getElementById("checkin-list").replaceChildren();
           document.getElementById("checkin-message").textContent = "";
+          clearVideos();
+          document.getElementById("video-message").textContent = "";
         }
       }
     }
@@ -385,7 +480,7 @@
           return;
         }
 
-        showArea("login");
+        showSession(null);
       });
 
     async function loadCheckins() {
@@ -397,7 +492,7 @@
         return;
       }
       const { data, error } = await client.from("checkins")
-        .select("id,created_at,member_name,resort_name,condition,comment")
+        .select("id,created_at,member_name,resort_name,condition,comment,user_id")
         .order("created_at", { ascending: false })
         .limit(30);
       if (error) {
@@ -423,6 +518,16 @@
           const comment = document.createElement("p");
           comment.textContent = `💬 ${item.comment}`;
           entry.append(comment);
+        }
+        if (canDelete(item.user_id)) {
+          appendDeleteButton(entry, "🗑️ このゲレンデなうを削除", async status => {
+            const { data: userData, error: userError } = await client.auth.getUser();
+            if (userError || !userData?.user) { status.textContent = "再ログインしてください。"; return; }
+            const { data: deleted, error: deleteError } = await client.from("checkins")
+              .delete().eq("id", item.id).select("id");
+            if (deleteError || !deleted?.length) { status.textContent = "削除できませんでした。権限を確認してください。"; return; }
+            await loadCheckins();
+          });
         }
         list.append(entry);
       }
@@ -461,6 +566,305 @@
           }
           status.textContent = "投稿を保存しました。";
           await loadCheckins();
+        } finally {
+          button.disabled = false;
+        }
+      });
+
+
+    // Storage内の動画は非公開。ログイン中のみ短期間有効な署名URLで再生する。
+    const VIDEO_BUCKET = "ski-videos";
+    const VIDEO_MAX_BYTES = 10 * 1024 * 1024;
+    const VIDEO_MAX_SECONDS = 15;
+    let videoListRequest = 0;
+
+    function clearVideos() {
+      videoListRequest++;
+      const list = document.getElementById("video-list");
+      for (const player of list.querySelectorAll("video")) {
+        player.pause();
+        player.removeAttribute("src");
+        player.load();
+      }
+      list.replaceChildren();
+    }
+
+    function videoFileType(file) {
+      const extension = file.name.toLowerCase().split(".").pop();
+      if (extension === "mp4" && (!file.type || file.type === "video/mp4")) return "video/mp4";
+      if (extension === "mov" && (!file.type || file.type === "video/quicktime")) return "video/quicktime";
+      return null;
+    }
+
+    function readVideoDuration(file) {
+      return new Promise((resolve, reject) => {
+        const probe = document.createElement("video");
+        const url = URL.createObjectURL(file);
+        let settled = false;
+        const timeout = setTimeout(() => finish(new Error("動画情報の取得がタイムアウトしました。")), 15000);
+        function finish(error, duration) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          probe.removeAttribute("src");
+          probe.load();
+          URL.revokeObjectURL(url);
+          if (error) reject(error); else resolve(duration);
+        }
+        probe.preload = "metadata";
+        probe.onloadedmetadata = () => {
+          if (!Number.isFinite(probe.duration) || probe.duration <= 0) {
+            finish(new Error("動画の長さを確認できませんでした。"));
+          } else {
+            finish(null, probe.duration);
+          }
+        };
+        probe.onerror = () => finish(new Error("この端末では動画を読み取れません。別のMP4動画をお試しください。"));
+        probe.src = url;
+      });
+    }
+
+    async function loadVideos() {
+      const list = document.getElementById("video-list");
+      clearVideos();
+      // clearVideos() は古い読み込みを無効化するため、最新IDを取り直す。
+      const currentRequest = videoListRequest;
+      list.textContent = "読み込み中...";
+      const { data: authData, error: authError } = await client.auth.getUser();
+      if (currentRequest !== videoListRequest || appArea.hidden) return;
+      if (authError || !authData.user) {
+        list.textContent = "ログイン状態を確認できません。";
+        return;
+      }
+      const { data, error } = await client.from("videos")
+        .select("id,created_at,member_name,storage_path,expires_at,user_id")
+        .gt("expires_at", new Date().toISOString())
+        .order("created_at", { ascending: false })
+        .limit(30);
+      if (currentRequest !== videoListRequest || appArea.hidden) return;
+      if (error) {
+        console.error("videos select error", error);
+        list.textContent = "動画一覧を取得できませんでした。";
+        return;
+      }
+      list.replaceChildren();
+      if (!data.length) {
+        list.textContent = "まだ動画の投稿がありません。";
+        return;
+      }
+      // コメントの取得は一括で行い、動画ごとの問い合わせ増加を防ぐ。
+      const videoIds = data.map(item => item.id);
+      const { data: comments, error: commentsError } = await client.from("video_comments")
+        .select("id,video_id,member_name,body,created_at,user_id")
+        .in("video_id", videoIds)
+        .order("created_at", { ascending: true })
+        .limit(1000);
+      if (currentRequest !== videoListRequest || appArea.hidden) return;
+      if (commentsError) console.error("video comments select error", commentsError);
+      for (const item of data) {
+        if (currentRequest !== videoListRequest || appArea.hidden) return;
+        const entry = document.createElement("div");
+        entry.className = "video-item";
+        const title = document.createElement("strong");
+        const when = item.created_at ? new Date(item.created_at).toLocaleString("ja-JP") : "";
+        title.textContent = `${item.member_name || "会員"}（${when}）`;
+        entry.append(title);
+        const { data: signed, error: signedError } = await client.storage
+          .from(VIDEO_BUCKET).createSignedUrl(item.storage_path, 60 * 30);
+        if (currentRequest !== videoListRequest || appArea.hidden) return;
+        if (signedError || !signed?.signedUrl) {
+          const msg = document.createElement("p");
+          msg.textContent = "動画を読み込めませんでした。";
+          entry.append(msg);
+        } else {
+          const player = document.createElement("video");
+          player.controls = true;
+          player.preload = "none";
+          player.playsInline = true;
+          player.src = signed.signedUrl;
+          entry.append(player);
+        }
+        const commentPanel = document.createElement("section");
+        commentPanel.className = "video-comments";
+        const commentTitle = document.createElement("h3");
+        commentTitle.textContent = "💬 動画へのアドバイス・コメント";
+        const commentList = document.createElement("div");
+        commentList.className = "comment-list";
+        if (commentsError) {
+          commentList.textContent = "コメントを読み込めませんでした。管理者に確認してください。";
+        } else {
+          renderComments(commentList, (comments || []).filter(c => c.video_id === item.id), item.id);
+        }
+        const form = document.createElement("form");
+        const nameLabel = document.createElement("label");
+        nameLabel.textContent = "お名前";
+        const nameInput = document.createElement("input");
+        nameInput.type = "text";
+        nameInput.maxLength = 40;
+        nameInput.required = true;
+        nameInput.placeholder = "会員名";
+        const bodyLabel = document.createElement("label");
+        bodyLabel.textContent = "コメント（500文字以内）";
+        const bodyInput = document.createElement("textarea");
+        bodyInput.maxLength = 500;
+        bodyInput.required = true;
+        bodyInput.placeholder = "滑りのアドバイスや感想を入力";
+        const submit = document.createElement("button");
+        submit.type = "submit";
+        submit.textContent = "コメントを投稿";
+        const status = document.createElement("p");
+        status.className = "comment-status";
+        status.setAttribute("role", "status");
+        form.append(nameLabel, nameInput, bodyLabel, bodyInput, submit, status);
+        form.addEventListener("submit", async event => {
+          event.preventDefault();
+          const member_name = nameInput.value.trim();
+          const body = bodyInput.value.trim();
+          if (!member_name || !body) { status.textContent = "お名前とコメントを入力してください。"; return; }
+          submit.disabled = true;
+          status.textContent = "投稿中...";
+          try {
+            const { data: authData, error: authError } = await client.auth.getUser();
+            if (authError || !authData.user) { status.textContent = "ログインし直してください。"; return; }
+            const { error: insertError } = await client.from("video_comments")
+              .insert({ video_id: item.id, user_id: authData.user.id, member_name, body });
+            if (insertError) {
+              console.error("video comment insert error", insertError);
+              status.textContent = "コメントを投稿できませんでした。権限・通信状態を確認してください。";
+              return;
+            }
+            bodyInput.value = "";
+            status.textContent = "コメントを投稿しました。";
+            const { data: latest, error: latestError } = await client.from("video_comments")
+              .select("id,video_id,member_name,body,created_at,user_id")
+              .eq("video_id", item.id).order("created_at", { ascending: true }).limit(100);
+            if (!latestError) renderComments(commentList, latest, item.id);
+          } catch (error) {
+            console.error("comment submission error", error);
+            status.textContent = "通信エラーが発生しました。";
+          } finally { submit.disabled = false; }
+        });
+        commentPanel.append(commentTitle, commentList, form);
+        entry.append(commentPanel);
+        if (canDelete(item.user_id)) {
+          appendDeleteButton(entry, "🗑️ この動画を削除", async status => {
+            const { data: userData, error: userError } = await client.auth.getUser();
+            if (userError || !userData?.user) { status.textContent = "再ログインしてください。"; return; }
+            // 先にStorageを削除する。DB削除失敗時は管理者による復旧が必要。
+            const { error: storageError } = await client.storage.from(VIDEO_BUCKET).remove([item.storage_path]);
+            if (storageError) { console.error("storage delete error", storageError); status.textContent = "動画ファイルを削除できませんでした。"; return; }
+            const { data: deleted, error: deleteError } = await client.from("videos")
+              .delete().eq("id", item.id).select("id");
+            if (deleteError || !deleted?.length) {
+              console.error("video database delete error", deleteError);
+              status.textContent = "動画ファイルは削除されましたが、投稿履歴の削除に失敗しました。管理者に連絡してください。";
+              return;
+            }
+            await loadVideos();
+          });
+        }
+        list.append(entry);
+      }
+    }
+
+    function renderComments(container, comments, videoId) {
+      container.replaceChildren();
+      if (!comments.length) { container.textContent = "まだコメントはありません。"; return; }
+      for (const comment of comments) {
+        const item = document.createElement("div");
+        item.className = "comment-item";
+        const name = document.createElement("strong");
+        const when = comment.created_at ? new Date(comment.created_at).toLocaleString("ja-JP") : "";
+        name.textContent = `${comment.member_name}（${when}）`;
+        const body = document.createElement("div");
+        body.textContent = comment.body;
+        item.append(name, body);
+        if (canDelete(comment.user_id)) {
+          appendDeleteButton(item, "🗑️ コメントを削除", async status => {
+            const { data: userData, error: userError } = await client.auth.getUser();
+            if (userError || !userData?.user) { status.textContent = "再ログインしてください。"; return; }
+            const { data: deleted, error: deleteError } = await client.from("video_comments")
+              .delete().eq("id", comment.id).select("id");
+            if (deleteError || !deleted?.length) { status.textContent = "コメントを削除できませんでした。権限を確認してください。"; return; }
+            const { data: latest, error: latestError } = await client.from("video_comments")
+              .select("id,video_id,member_name,body,created_at,user_id")
+              .eq("video_id", videoId).order("created_at", { ascending: true }).limit(100);
+            if (latestError) { status.textContent = "削除後の一覧を取得できませんでした。更新してください。"; return; }
+            renderComments(container, latest, videoId);
+          });
+        }
+        container.append(item);
+      }
+    }
+
+    document.getElementById("refresh-videos")
+      .addEventListener("click", loadVideos);
+
+    document.getElementById("video-form")
+      .addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const status = document.getElementById("video-message");
+        const button = document.getElementById("video-submit");
+        const file = document.getElementById("video-file").files[0];
+        const member_name = document.getElementById("video-member-name").value.trim();
+        if (!file || !member_name) {
+          status.textContent = "お名前と動画を指定してください。";
+          return;
+        }
+        const contentType = videoFileType(file);
+        if (!contentType) {
+          status.textContent = "MP4またはMOVファイルを選択してください。";
+          return;
+        }
+        if (file.size > VIDEO_MAX_BYTES || file.size === 0) {
+          status.textContent = "動画は10MB以下のファイルを選択してください。";
+          return;
+        }
+        button.disabled = true;
+        status.textContent = "動画の長さを確認しています...";
+        try {
+          const duration = await readVideoDuration(file);
+          if (duration > VIDEO_MAX_SECONDS + 0.05) {
+            status.textContent = "15秒以内の動画を選択してください。";
+            return;
+          }
+          const { data: authData, error: authError } = await client.auth.getUser();
+          if (authError || !authData.user || appArea.hidden) {
+            status.textContent = "ログインし直してください。";
+            return;
+          }
+          const user = authData.user;
+          const extension = contentType === "video/mp4" ? "mp4" : "mov";
+          const path = `${user.id}/${crypto.randomUUID()}.${extension}`;
+          status.textContent = "動画をアップロード中...";
+          const { error: uploadError } = await client.storage.from(VIDEO_BUCKET)
+            .upload(path, file, { contentType, upsert: false });
+          if (uploadError) {
+            console.error("video upload error", uploadError);
+            status.textContent = "アップロードに失敗しました。通信・権限設定をご確認ください。";
+            return;
+          }
+          const { error: insertError } = await client.from("videos")
+            .insert({ user_id: user.id, member_name, storage_path: path });
+          if (insertError) {
+            console.error("videos insert error", insertError);
+            // DB登録に失敗した動画がStorageに残らないよう、削除を試みる。
+            const { error: cleanupError } = await client.storage
+              .from(VIDEO_BUCKET).remove([path]);
+            if (cleanupError) {
+              console.error("orphan video cleanup error", cleanupError);
+              status.textContent = "投稿履歴の登録に失敗し、動画の後片付けもできませんでした。管理者に連絡してください。";
+            } else {
+              status.textContent = "投稿履歴の登録に失敗しました。動画の転送を取り消しました。もう一度お試しください。";
+            }
+            return;
+          }
+          document.getElementById("video-file").value = "";
+          status.textContent = "動画を投稿しました。";
+          await loadVideos();
+        } catch (error) {
+          console.error("video validation error", error);
+          status.textContent = error.message || "動画を確認できませんでした。";
         } finally {
           button.disabled = false;
         }
