@@ -90,6 +90,9 @@
     .comment-item { padding: 8px 0; border-bottom: 1px solid #ddd; font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
     .comment-item strong { display: block; }
     .comment-status { font-size: 13px; min-height: 1em; }
+    .delete-button { width: auto; display: inline-block; margin: 9px 0 3px; padding: 8px 14px; background: #a52a2a; font-size: 13px; }
+    .delete-button:disabled { opacity: .5; }
+    .delete-note { color: #9b2727; font-size: 13px; white-space: pre-wrap; }
 
   </style>
 </head>
@@ -222,6 +225,45 @@
     document.getElementById("tab-checkins").addEventListener("click", () => selectTab("checkins"));
     document.getElementById("tab-videos").addEventListener("click", () => selectTab("videos"));
 
+    // 管理者判定はDBのSECURITY DEFINER RPCで行う。表示判定とは別にRLSが削除権限を強制する。
+    let currentUserId = null;
+    let isAppAdmin = false;
+    let sessionGeneration = 0;
+    async function refreshDeleteIdentity() {
+      const generation = ++sessionGeneration;
+      const { data, error } = await client.auth.getUser();
+      if (generation !== sessionGeneration || error || !data?.user) {
+        if (generation === sessionGeneration) { currentUserId = null; isAppAdmin = false; }
+        return;
+      }
+      currentUserId = data.user.id;
+      isAppAdmin = false;
+      const result = await client.rpc("is_app_admin");
+      if (generation !== sessionGeneration) return;
+      if (result.error) console.warn("Admin status lookup unavailable", result.error);
+      else isAppAdmin = result.data === true;
+    }
+    function canDelete(ownerId) {
+      return !!currentUserId && (isAppAdmin || (ownerId != null && ownerId === currentUserId));
+    }
+    function appendDeleteButton(container, label, handler) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "delete-button";
+      button.textContent = label;
+      const status = document.createElement("div");
+      status.className = "delete-note";
+      button.addEventListener("click", async () => {
+        if (!window.confirm("この投稿を削除しますか？削除すると元に戻せません。")) return;
+        button.disabled = true;
+        status.textContent = "削除中...";
+        try { await handler(status); }
+        catch (error) { console.error("delete failed", error); status.textContent = "削除できませんでした。通信状態をご確認ください。"; }
+        finally { button.disabled = false; }
+      });
+      container.append(button, status);
+    }
+
     let recoveryMode = false;
     let recoveryReady = false;
 
@@ -238,9 +280,13 @@
         showArea(session ? "app" : "login");
         if (session) {
           selectTab("checkins");
-          loadCheckins();
-          loadVideos();
+          refreshDeleteIdentity().then(() => {
+            if (!appArea.hidden) { loadCheckins(); loadVideos(); }
+          });
         } else {
+          sessionGeneration++;
+          currentUserId = null;
+          isAppAdmin = false;
           document.getElementById("checkin-list").replaceChildren();
           document.getElementById("checkin-message").textContent = "";
           clearVideos();
@@ -446,7 +492,7 @@
         return;
       }
       const { data, error } = await client.from("checkins")
-        .select("id,created_at,member_name,resort_name,condition,comment")
+        .select("id,created_at,member_name,resort_name,condition,comment,user_id")
         .order("created_at", { ascending: false })
         .limit(30);
       if (error) {
@@ -472,6 +518,16 @@
           const comment = document.createElement("p");
           comment.textContent = `💬 ${item.comment}`;
           entry.append(comment);
+        }
+        if (canDelete(item.user_id)) {
+          appendDeleteButton(entry, "🗑️ このゲレンデなうを削除", async status => {
+            const { data: userData, error: userError } = await client.auth.getUser();
+            if (userError || !userData?.user) { status.textContent = "再ログインしてください。"; return; }
+            const { data: deleted, error: deleteError } = await client.from("checkins")
+              .delete().eq("id", item.id).select("id");
+            if (deleteError || !deleted?.length) { status.textContent = "削除できませんでした。権限を確認してください。"; return; }
+            await loadCheckins();
+          });
         }
         list.append(entry);
       }
@@ -581,7 +637,7 @@
         return;
       }
       const { data, error } = await client.from("videos")
-        .select("id,created_at,member_name,storage_path,expires_at")
+        .select("id,created_at,member_name,storage_path,expires_at,user_id")
         .gt("expires_at", new Date().toISOString())
         .order("created_at", { ascending: false })
         .limit(30);
@@ -599,7 +655,7 @@
       // コメントの取得は一括で行い、動画ごとの問い合わせ増加を防ぐ。
       const videoIds = data.map(item => item.id);
       const { data: comments, error: commentsError } = await client.from("video_comments")
-        .select("id,video_id,member_name,body,created_at")
+        .select("id,video_id,member_name,body,created_at,user_id")
         .in("video_id", videoIds)
         .order("created_at", { ascending: true })
         .limit(1000);
@@ -637,7 +693,7 @@
         if (commentsError) {
           commentList.textContent = "コメントを読み込めませんでした。管理者に確認してください。";
         } else {
-          renderComments(commentList, (comments || []).filter(c => c.video_id === item.id));
+          renderComments(commentList, (comments || []).filter(c => c.video_id === item.id), item.id);
         }
         const form = document.createElement("form");
         const nameLabel = document.createElement("label");
@@ -680,9 +736,9 @@
             bodyInput.value = "";
             status.textContent = "コメントを投稿しました。";
             const { data: latest, error: latestError } = await client.from("video_comments")
-              .select("id,video_id,member_name,body,created_at")
+              .select("id,video_id,member_name,body,created_at,user_id")
               .eq("video_id", item.id).order("created_at", { ascending: true }).limit(100);
-            if (!latestError) renderComments(commentList, latest);
+            if (!latestError) renderComments(commentList, latest, item.id);
           } catch (error) {
             console.error("comment submission error", error);
             status.textContent = "通信エラーが発生しました。";
@@ -690,11 +746,28 @@
         });
         commentPanel.append(commentTitle, commentList, form);
         entry.append(commentPanel);
+        if (canDelete(item.user_id)) {
+          appendDeleteButton(entry, "🗑️ この動画を削除", async status => {
+            const { data: userData, error: userError } = await client.auth.getUser();
+            if (userError || !userData?.user) { status.textContent = "再ログインしてください。"; return; }
+            // 先にStorageを削除する。DB削除失敗時は管理者による復旧が必要。
+            const { error: storageError } = await client.storage.from(VIDEO_BUCKET).remove([item.storage_path]);
+            if (storageError) { console.error("storage delete error", storageError); status.textContent = "動画ファイルを削除できませんでした。"; return; }
+            const { data: deleted, error: deleteError } = await client.from("videos")
+              .delete().eq("id", item.id).select("id");
+            if (deleteError || !deleted?.length) {
+              console.error("video database delete error", deleteError);
+              status.textContent = "動画ファイルは削除されましたが、投稿履歴の削除に失敗しました。管理者に連絡してください。";
+              return;
+            }
+            await loadVideos();
+          });
+        }
         list.append(entry);
       }
     }
 
-    function renderComments(container, comments) {
+    function renderComments(container, comments, videoId) {
       container.replaceChildren();
       if (!comments.length) { container.textContent = "まだコメントはありません。"; return; }
       for (const comment of comments) {
@@ -706,6 +779,20 @@
         const body = document.createElement("div");
         body.textContent = comment.body;
         item.append(name, body);
+        if (canDelete(comment.user_id)) {
+          appendDeleteButton(item, "🗑️ コメントを削除", async status => {
+            const { data: userData, error: userError } = await client.auth.getUser();
+            if (userError || !userData?.user) { status.textContent = "再ログインしてください。"; return; }
+            const { data: deleted, error: deleteError } = await client.from("video_comments")
+              .delete().eq("id", comment.id).select("id");
+            if (deleteError || !deleted?.length) { status.textContent = "コメントを削除できませんでした。権限を確認してください。"; return; }
+            const { data: latest, error: latestError } = await client.from("video_comments")
+              .select("id,video_id,member_name,body,created_at,user_id")
+              .eq("video_id", videoId).order("created_at", { ascending: true }).limit(100);
+            if (latestError) { status.textContent = "削除後の一覧を取得できませんでした。更新してください。"; return; }
+            renderComments(container, latest, videoId);
+          });
+        }
         container.append(item);
       }
     }
