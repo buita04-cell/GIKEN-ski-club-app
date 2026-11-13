@@ -71,6 +71,14 @@
     .checkin-item { padding: 12px 0; border-bottom: 1px solid #ddd; overflow-wrap: anywhere; }
     .checkin-item p { margin: 4px 0; }
     #checkin-message { min-height: 1.5em; }
+    .admin-panel { text-align: left; margin: 24px 0; padding: 16px; background: #fff; border: 2px solid #344968; border-radius: 12px; }
+    .admin-panel h2 { text-align: center; }
+    .admin-item { padding: 14px 0; border-bottom: 1px solid #ddd; overflow-wrap: anywhere; }
+    .admin-item p { margin: 5px 0; }
+    .admin-actions { display: flex; gap: 8px; }
+    .admin-actions button { flex: 1; margin-top: 10px; padding: 12px 4px; }
+    .admin-actions .reject { background: #596579; }
+    #admin-message { overflow-wrap: anywhere; }
   </style>
 </head>
 
@@ -149,6 +157,14 @@
         <button id="refresh-checkins" type="button" class="sub-button">一覧を更新</button>
         <div id="checkin-list" aria-live="polite"></div>
       </div>
+      <section id="admin-panel" class="admin-panel" hidden>
+        <h2>🔐 管理者メニュー</h2>
+        <h3>会員登録申請一覧</h3>
+        <button id="refresh-requests" class="sub-button" type="button">申請一覧を更新</button>
+        <p id="admin-message" role="status" aria-live="polite"></p>
+        <div id="membership-request-list" aria-live="polite"></div>
+        <p>承認後の招待メール送信は、現時点では管理者が別途行います。</p>
+      </section>
       <button id="logout" type="button">ログアウト</button>
     </section>
   </main>
@@ -179,6 +195,7 @@
 
     let recoveryMode = false;
     let recoveryReady = false;
+    let adminCheckSequence = 0;
 
     function showArea(area) {
       loginArea.hidden = area !== "login";
@@ -193,7 +210,12 @@
         showArea(session ? "app" : "login");
         if (session) {
           loadCheckins();
+          checkAdminAccess(session);
         } else {
+          adminCheckSequence++;
+          document.getElementById("admin-panel").hidden = true;
+          document.getElementById("membership-request-list").replaceChildren();
+          document.getElementById("admin-message").textContent = "";
           document.getElementById("checkin-list").replaceChildren();
           document.getElementById("checkin-message").textContent = "";
         }
@@ -427,6 +449,115 @@
         list.append(entry);
       }
     }
+
+    async function checkAdminAccess(session) {
+      const sequence = ++adminCheckSequence;
+      const panel = document.getElementById("admin-panel");
+      panel.hidden = true;
+      if (!session || !session.user) return;
+      const { data, error } = await client.from("app_admins")
+        .select("user_id")
+        .eq("user_id", session.user.id)
+        .maybeSingle();
+      if (sequence !== adminCheckSequence) return;
+      if (error) {
+        console.error("admin check failed", error.code);
+        return;
+      }
+      if (!data) return;
+      panel.hidden = false;
+      loadMembershipRequests();
+    }
+
+    async function loadMembershipRequests() {
+      const list = document.getElementById("membership-request-list");
+      const status = document.getElementById("admin-message");
+      if (document.getElementById("admin-panel").hidden) return;
+      list.replaceChildren();
+      status.textContent = "申請一覧を読み込み中...";
+      const { data, error } = await client.from("membership_requests")
+        .select("id,member_name,email,status,invitation_status,created_at")
+        .order("created_at", { ascending: false })
+        .limit(100);
+      if (document.getElementById("admin-panel").hidden) return;
+      if (error) {
+        console.error("membership requests select failed", error.code);
+        status.textContent = "申請一覧を取得できません。Supabaseの管理者向けSELECT権限（RLS）を確認してください。";
+        return;
+      }
+      status.textContent = `申請 ${data.length} 件（最大100件）`;
+      if (!data.length) {
+        list.textContent = "表示できる申請はありません。";
+        return;
+      }
+      for (const item of data) {
+        const entry = document.createElement("div");
+        entry.className = "admin-item";
+        const name = document.createElement("strong");
+        name.textContent = item.member_name || "名前未設定";
+        const email = document.createElement("p");
+        email.textContent = `メール：${item.email || ""}`;
+        const date = document.createElement("p");
+        date.textContent = `申請日時：${item.created_at ? new Date(item.created_at).toLocaleString("ja-JP") : "不明"}`;
+        const state = document.createElement("p");
+        state.textContent = `審査：${item.status} ／ 招待：${item.invitation_status || "不明"}`;
+        entry.append(name, email, date, state);
+        if (item.status === "pending") {
+          const actions = document.createElement("div");
+          actions.className = "admin-actions";
+          for (const action of ["approve", "reject"]) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.textContent = action === "approve" ? "承認" : "却下";
+            if (action === "reject") button.className = "reject";
+            button.addEventListener("click", () => reviewMembershipRequest(item, action));
+            actions.append(button);
+          }
+          entry.append(actions);
+        }
+        list.append(entry);
+      }
+    }
+
+    async function reviewMembershipRequest(item, action) {
+      const verb = action === "approve" ? "承認" : "却下";
+      if (!confirm(`${item.member_name} さんの申請を${verb}しますか？`)) return;
+      const status = document.getElementById("admin-message");
+      const buttons = document.querySelectorAll(".admin-actions button");
+      buttons.forEach(button => { button.disabled = true; });
+      status.textContent = `${verb}処理中...`;
+      try {
+        const { data: authData, error: authError } = await client.auth.getSession();
+        if (authError || !authData.session?.access_token) {
+          status.textContent = "ログイン状態を確認できません。再ログインしてください。";
+          return;
+        }
+        const response = await fetch(`${SUPABASE_URL}/functions/v1/review-membership-request`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "apikey": SUPABASE_KEY,
+            "Authorization": `Bearer ${authData.session.access_token}`
+          },
+          body: JSON.stringify({ request_id: item.id, action })
+        });
+        const result = await response.json();
+        if (!response.ok || !result.success) {
+          status.textContent = result.error || `処理に失敗しました（HTTP ${response.status}）。`;
+          return;
+        }
+        await loadMembershipRequests();
+        status.textContent = result.message || `${verb}しました。`;
+      } catch (error) {
+        console.error("membership review request failed", error);
+        status.textContent = "通信エラーです。処理状況を確認してから再試行してください。";
+      } finally {
+        buttons.forEach(button => { button.disabled = false; });
+      }
+    }
+
+    document.getElementById("refresh-requests")
+      .addEventListener("click", loadMembershipRequests);
 
     document.getElementById("refresh-checkins")
       .addEventListener("click", loadCheckins);
